@@ -7,6 +7,14 @@
 #include <objc/objc-runtime.h>
 #elif defined(_WIN32)
 #include <windows.h>
+#elif defined(__EMSCRIPTEN__)
+#include <SDL/SDL.h>
+#include <emscripten.h>
+#  ifndef EM_ASYNCIFY
+// EM_ASYNCIFY defaults to 1 to keep existing code working as normal
+// but you have to compile with `-sASYNCIFY`
+#    define EM_ASYNCIFY 1
+#  endif
 #else
 #define _DEFAULT_SOURCE 1
 #include <X11/XKBlib.h>
@@ -32,6 +40,8 @@ struct fenster {
   id wnd;
 #elif defined(_WIN32)
   HWND hwnd;
+#elif defined(__EMSCRIPTEN__)
+  SDL_Surface *screen;
 #else
   Display *dpy;
   Window w;
@@ -51,7 +61,94 @@ FENSTER_API int64_t fenster_time(void);
 #define fenster_pixel(f, x, y) ((f)->buf[((y) * (f)->width) + (x)])
 
 #ifndef FENSTER_HEADER
-#if defined(__APPLE__)
+
+#if defined(__EMSCRIPTEN__)
+
+FENSTER_API int fenster_open(struct fenster *f) {
+	SDL_Init(SDL_INIT_VIDEO);
+	f->screen = SDL_SetVideoMode(f->width, f->height, 32, SDL_SWSURFACE);
+	emscripten_set_window_title(f->title);
+	return 0;
+}
+
+// https://www.libsdl.org/release/SDL-1.2.15/docs/html/sdlkey.html
+// clang-format off
+static const int FENSTER_KEYCODES[] = {SDLK_BACKSPACE,8,SDLK_DELETE,127,SDLK_DOWN,18,SDLK_END,5,SDLK_ESCAPE,27,SDLK_HOME,2,SDLK_INSERT,26,SDLK_LEFT,20,SDLK_PAGEDOWN,4,SDLK_PAGEUP,3,SDLK_RETURN,10,SDLK_RIGHT,19,SDLK_TAB,9,SDLK_UP,17,SDLK_QUOTE,39,SDLK_BACKSLASH,92,SDLK_LEFTBRACKET,91,SDLK_RIGHTBRACKET,93,SDLK_COMMA,44,SDLK_EQUALS,61,SDLK_BACKQUOTE,96,SDLK_MINUS,45,SDLK_PERIOD,46,SDLK_SEMICOLON,59,SDLK_SLASH,47,SDLK_SPACE,32,SDLK_a,65,SDLK_b,66,SDLK_c,67,SDLK_d,68,SDLK_e,69,SDLK_f,70,SDLK_g,71,SDLK_h,72,SDLK_i,73,SDLK_j,74,SDLK_k,75,SDLK_l,76,SDLK_m,77,SDLK_n,78,SDLK_o,79,SDLK_p,80,SDLK_q,81,SDLK_r,82,SDLK_s,83,SDLK_t,84,SDLK_u,85,SDLK_v,86,SDLK_w,87,SDLK_x,88,SDLK_y,89,SDLK_z,90,SDLK_0,48,SDLK_1,49,SDLK_2,50,SDLK_3,51,SDLK_4,52,SDLK_5,53,SDLK_6,54,SDLK_7,55,SDLK_8,56,SDLK_9,57};
+// clang-format on
+
+FENSTER_API int fenster_loop(struct fenster *f) {
+
+	// Unfortunately the screen is ABGR while the fenster buffer is ARGB
+	if (SDL_MUSTLOCK(f->screen)) SDL_LockSurface(f->screen);
+	for (int i = 0; i < f->width * f->height; i++) {
+		uint32_t pixel = f->buf[i];
+#if 0
+		uint32_t r = (pixel >> 16) & 0xFF;
+		uint32_t g = (pixel >> 8) & 0xFF;
+		uint32_t b = (pixel >> 0) & 0xFF;
+		*((Uint32*)f->screen->pixels + i) = SDL_MapRGBA(f->screen->format, r, g, b, 0);
+#else
+		pixel = (pixel & 0xFF00FF00) | ((pixel & 0xFF0000) >> 16) | ((pixel & 0xFF) << 16);
+		*((Uint32*)f->screen->pixels + i) = pixel;
+#endif
+	}
+	if (SDL_MUSTLOCK(f->screen)) SDL_UnlockSurface(f->screen);
+
+	SDL_Flip(f->screen);
+
+	SDL_Event event;
+    while(SDL_PollEvent(&event)) {
+        switch(event.type) {
+			case SDL_MOUSEMOTION: {
+				f->x = event.motion.x;
+				f->y = event.motion.y;
+			} break;
+			case SDL_MOUSEBUTTONDOWN:
+			case SDL_MOUSEBUTTONUP: {
+				f->x = event.button.x;
+				f->y = event.button.y;
+				if(event.button.button == SDL_BUTTON_LEFT)
+					f->mouse = event.type == SDL_MOUSEBUTTONDOWN;
+			} break;
+			case SDL_KEYDOWN:
+			case SDL_KEYUP: {
+				// event.key.keysym
+				int mask = 0;
+				switch(event.key.keysym.sym) {
+					case SDLK_RSHIFT:
+					case SDLK_LSHIFT: mask = 0x2; break;
+					case SDLK_RCTRL:
+					case SDLK_LCTRL: mask = 0x1; break;
+					case SDLK_RALT:
+					case SDLK_LALT: mask = 0x4; break;
+					case SDLK_RSUPER:
+					case SDLK_LSUPER: mask = 0x8; break;
+				}
+				if(mask) {
+				  f->mod = (event.key.state == SDL_PRESSED) ? f->mod | mask : f->mod & ~mask;
+				  break;
+				}
+
+				for (unsigned int i = 0; i < (sizeof FENSTER_KEYCODES / sizeof FENSTER_KEYCODES[0]); i += 2) {
+					if (FENSTER_KEYCODES[i] == event.key.keysym.sym) {
+					  f->keys[FENSTER_KEYCODES[i + 1]] = (event.key.state == SDL_PRESSED);
+					  break;
+				    }
+			    }
+			} break;
+			default: break;
+		}
+	}
+
+	return 0;
+}
+
+FENSTER_API void fenster_close(struct fenster *f) {
+	(void)f;
+	SDL_Quit();
+}
+
+#elif defined(__APPLE__)
 #define msg(r, o, s) ((r(*)(id, SEL))objc_msgSend)(o, sel_getUid(s))
 #define msg1(r, o, s, A, a)                                                    \
   ((r(*)(id, SEL, A))objc_msgSend)(o, sel_getUid(s), a)
@@ -317,6 +414,14 @@ FENSTER_API int64_t fenster_time() {
   QueryPerformanceFrequency(&freq);
   QueryPerformanceCounter(&count);
   return (int64_t)(count.QuadPart * 1000.0 / freq.QuadPart);
+}
+#elif defined(__EMSCRIPTEN__)
+FENSTER_API void fenster_sleep(int64_t ms) {
+	SDL_Delay((uint32_t)ms);
+}
+
+FENSTER_API int64_t fenster_time(void) {
+	return (int64_t)SDL_GetTicks();
 }
 #else
 FENSTER_API void fenster_sleep(int64_t ms) {
